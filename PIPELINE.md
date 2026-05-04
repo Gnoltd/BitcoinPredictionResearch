@@ -4,10 +4,13 @@
 
 **Repository**: Gnoltd/BitcoinPredictionResearch-  
 **Language**: 100% Jupyter Notebook (Python)  
-**Description**: Technical Indicator Analysis & Prediction Pipeline  
+**Description**: Technical Indicator Analysis & Close-Price Regression Pipeline  
 **Target Asset**: Bitcoin  
-**Time Period**: 2023-01-01 to 2025-12-31 (3 years)  
-**Prediction Horizons**: 1-day, 7-day, 14-day
+**Time Period**: 2016-01-01 to 2025-12-31 (10 years)  
+**Train / Test Split**: 2016-01-01 → 2023-12-31 (train) | 2024-01-01 → 2025-12-31 (test)  
+**Prediction Horizons**: 1-day, 7-day, 14-day  
+**Regression Target**: Raw Close Price (USD) — not log returns  
+**Evaluation Metrics**: RMSE, MAE, MAPE, R²
 
 ---
 
@@ -22,28 +25,34 @@
 ┌─────────────────────────────────────────────────────────────────┐
 │                    STAGE 1: DATA CRAWLING                        │
 │ • Source: BitInfoCharts web scraping                           │
-│ • 16 blockchain metrics + price                                │
-│ • Output: bitcoin_raw_data.csv (1096 × 16)                    │
+│ • 15 blockchain metrics + Close price (price → Close)          │
+│ • Date range: 2016-01-01 to 2025-12-31 (~3 652 days)          │
+│ • Reproducibility: retrieval timestamp + SHA-256 hash logged   │
+│ • Output: bitcoin_raw_data.csv + bitcoin_retrieval_log.csv     │
 └──────────────────────────────┬──────────────────────────────────┘
                                ↓
 ┌─────────────────────────────────────────────────────────────────┐
 │              STAGE 2: DATA PREPROCESSING & CLEANING              │
 │ • Missing Value Imputation (linear, ffill, bfill)              │
-│ • Log Return Calculation: log(price_t / price_t-1)             │
-│ • Outlier Detection & Clipping (2%-98% quantile)               │
-│ • MinMax Normalization (range: [-1, 1])                        │
-│ • Wavelet Denoising (MODWT, db2, 5 levels)                    │
-│ • Output: bitcoin_full_preprocessed.csv (1095 × 17)           │
+│ • Target: raw Close Price kept unscaled (regression target)    │
+│ • Outlier Detection & Clipping (2%-98%, fit on train only)     │
+│ • MinMax Normalization of FEATURES ONLY (range: [-1, 1])       │
+│ • Wavelet Denoising (MODWT, db2, 5 levels) on features only   │
+│ • Close price NOT denoised (preserves regression signal)       │
+│ • Output: bitcoin_full_preprocessed.csv (features + target)   │
 └──────────────────────────────┬──────────────────────────────────┘
                                ↓
 ┌─────────────────────────────────────────────────────────────────┐
 │              STAGE 3: FEATURE ENGINEERING                        │
-│ • Base Features: 16 blockchain metrics                         │
+│ • Base Features: 15 blockchain metrics (scaled/denoised)       │
 │ • Timeframes: 1d, 7d, 14d                                      │
 │ • 8 Indicators: SMA, EMA, WMA, STD, VAR, ROC, RSI, TRIX       │
-│ • Total Generated: 403 features (16 × 3 × 8 + originals)      │
-│ • Multi-target: Target_1d, Target_7d, Target_14d              │
-│ • Output: bitcoin_full_engineered_features.csv (1067 × 403)   │
+│ • Total Generated: ~390 features (15 × 3 × 8 + originals)     │
+│ • Regression targets (Close price ahead):                      │
+│   Target_1d = Close_{t+1}                                      │
+│   Target_7d = Close_{t+7}                                      │
+│   Target_14d = Close_{t+14}                                    │
+│ • Output: bitcoin_full_engineered_features.csv                 │
 └──────────────────────────────┬──────────────────────────────────┘
                                ↓
       ┌────────────────────────┴────────────────────────┐
@@ -71,18 +80,16 @@
                                ↓
 ┌─────────────────────────────────────────────────────────────────┐
 │         STAGE 5: BASELINE MODELING (Auto ARIMA)                 │
-│ • Grid Search: ARIMA(0-5, 0, 0-5)                             │
-│ • Train on Clipped Data (stable patterns)                      │
-│ • Evaluate on Raw Data (real-world performance)                │
+│ • Grid Search: ARIMA(0-5, d, 0-5), d auto-detected (ADF/KPSS) │
+│ • Price is non-stationary → d ≥ 1 required                    │
+│ • Train on 2016-2023 Close prices (in-sample)                  │
+│ • Evaluate on 2024-2025 Close prices (out-of-sample)           │
 │                                                                 │
-│ Optimal Models:                                                 │
-│ ├─ 1d: ARIMA(1,0,0) | RMSE: 0.0159 | MAE: 0.0112              │
-│ ├─ 7d: ARIMA(5,0,4) | RMSE: 0.0501 | MAE: 0.0384              │
-│ └─ 14d: ARIMA(2,0,0) | RMSE: 0.0764 | MAE: 0.0582             │
+│ Metrics: RMSE, MAE, MAPE (%), R²                               │
 │                                                                 │
 │ Output: RESULTS/ARIMA/                                          │
 │ • bitcoin_AutoARIMA_predictions_*.csv                          │
-│ • bitcoin_AutoARIMA_forecast_chart_*.png                       │
+│ • bitcoin_AutoARIMA_forecast_chart_full_*.png                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -93,7 +100,7 @@
 ### **STAGE 1: Data Crawling (Jupyter Cell 2)**
 
 #### **Data Sources**
-Fetching from BitInfoCharts API via web scraping:
+Fetching from BitInfoCharts API via web scraping (2016-01-01 to 2025-12-31):
 
 | Feature | Description | Unit |
 |---------|-------------|------|
@@ -112,7 +119,15 @@ Fetching from BitInfoCharts API via web scraping:
 | `top100cap` | Top 100 addresses capitalization | BTC |
 | `fee-to-reward-ratio` | Fee to reward ratio | Ratio |
 | `mediantransactionfee` | Median transaction fee | BTC |
-| `price` | BTC closing price | USD |
+| `Close` | BTC closing price (regression target) | USD |
+
+#### **Reproducibility Logging**
+Each run logs a retrieval timestamp (UTC) and SHA-256 hash of each fetched page:
+```python
+retrieval_date = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
+content_hash   = hashlib.sha256(response.content).hexdigest()
+```
+- **Log file**: `bitcoin_retrieval_log.csv` (timestamp + per-feature SHA-256 hashes)
 
 #### **Data Extraction Function**
 ```python
@@ -120,21 +135,21 @@ def fetch_bitinfocharts_data(feature, coin):
     url = f"https://bitinfocharts.com/comparison/{coin}-{feature}.html#alltime"
     headers = {'User-Agent': 'Mozilla/5.0'}
     response = requests.get(url, headers=headers)
-    
-    # Regex pattern to extract JavaScript date/value pairs
+    content_hash = hashlib.sha256(response.content).hexdigest()
+
     pattern = r'\[new Date\("(.*?)"\),(.*?)\]'
     matches = re.findall(pattern, response.text)
-    
-    dates = [pd.to_datetime(match[0]) for match in matches]
+
+    dates  = [pd.to_datetime(match[0]) for match in matches]
     values = [float(match[1]) if match[1] != 'null' else np.nan for match in matches]
-    
-    return pd.DataFrame({'Date': dates, feature: values})
+
+    df = pd.DataFrame({'Date': dates, feature: values}).set_index('Date')
+    return df, content_hash
 ```
 
 #### **Output**
 - **File**: `bitcoin_raw_data.csv`
-- **Shape**: (1096, 16)
-- **Date Range**: 2023-01-01 to 2025-12-31
+- **Date Range**: 2016-01-01 to 2025-12-31 (~3 652 rows)
 - **Missing Values**: Handled in next stage
 
 ---
@@ -154,100 +169,98 @@ df_full.fillna(method='bfill', inplace=True)
 - Forward fill for recent history
 - Backward fill for leading gaps
 
-#### **2.2 Log Return Calculation**
+#### **2.2 Regression Target — Raw Close Price**
+
+The pipeline targets **raw Close price (USD)** directly (not log returns).  
+Close price is stored as `y_raw_close_price` **before** any scaling or denoising:
+
 ```python
-# Prevent overnight gaps from affecting models
-df_full['log_return'] = np.log(df_full['price'] / df_full['price'].shift(1))
+y_raw_close = df_full['Close'].copy()   # unscaled regression target
 ```
 
-**Why Log Returns?**
-- Scale-invariant (easier for ML)
-- Mathematically additive (sum of returns = total return)
-- Reduces heteroskedasticity
-- Better for regression models
+> **Why price levels instead of returns?**  
+> The study aims to forecast the actual future price value at horizon h, which  
+> directly informs buy/sell decisions and portfolio valuation.  
+> Non-stationarity is handled by ARIMA's automatic differencing (d≥1) in Stage 5.
 
 #### **2.3 Outlier Detection & Clipping**
 
 **Detection Strategy**:
-- Fit on **training data only** (2023-01-01 to 2025-05-31)
+- Fit on **training data only** (2016-01-01 to 2023-12-31)
 - Apply bounds to full dataset (prevents data leakage)
 - Quantile thresholds: 2% (lower) and 98% (upper)
+- Applied to **Close price** column (extreme values, e.g., flash crashes)
 
 ```python
-train_mask = (df_full.index >= train_start) & (df_full.index <= train_end)
+train_mask    = (df_full.index >= train_start) & (df_full.index <= train_end)
 df_train_only = df_full.loc[train_mask]
 
-lower_bound = df_train_only['log_return'].quantile(0.02)
-upper_bound = df_train_only['log_return'].quantile(0.98)
-
-# Clipping (not removal) preserves time series continuity
-df_full['log_return'] = np.clip(df_full['log_return'], lower_bound, upper_bound)
+lower_bound = df_train_only['Close'].quantile(0.02)
+upper_bound = df_train_only['Close'].quantile(0.98)
 ```
 
-**Results**:
-- Outliers Detected: 40
-- Bounds: 2% = -0.0234, 98% = +0.0287
-- Visualization: Outlier clipping chart saved
+#### **2.4 Leakage-Safe Normalisation (FEATURES ONLY)**
 
-#### **2.4 Normalization (MinMax Scaling)**
+**Critical**: Close price (the regression target) is **not scaled**.  
+Only the on-chain feature columns are normalised:
 
 ```python
 from sklearn.preprocessing import MinMaxScaler
 
+# Exclude Close price from scaling
+feature_cols = [col for col in df_full.columns if col != 'Close']
+
 # FIT ONLY ON TRAINING DATA
 scaler = MinMaxScaler(feature_range=(-1, 1))
-scaler.fit(df_train_only)
+scaler.fit(df_features_train)   # df_features_train = train rows, feature cols only
 
-# TRANSFORM FULL DATASET
-df_full_scaled = pd.DataFrame(
-    scaler.transform(df_full), 
-    index=df_full.index, 
-    columns=df_full.columns
+# TRANSFORM FULL FEATURE MATRIX
+df_features_scaled = pd.DataFrame(
+    scaler.transform(df_features),
+    index=df_features.index,
+    columns=feature_cols
 )
 ```
 
-**Critical**: Fit on train, transform all (prevents leakage)
+**Critical**: Fit on train features, transform all (prevents leakage)
 
-#### **2.5 Wavelet Denoising (MODWT)**
+#### **2.5 Wavelet Denoising (MODWT) — Features Only**
 
-**Maximal Overlap Discrete Wavelet Transform**:
+Applied to **scaled features only**; the Close price target is excluded:
+
 ```python
 import pywt
 
 def apply_modwt(df):
-    df_denoised = df.copy()
-    data_length = len(df)
+    df_denoised   = df.copy()
+    data_length   = len(df)
     padded_length = int(np.ceil(data_length / 32.0)) * 32
-    
+
     for col in df.columns:
-        signal = df[col].values
+        signal        = df[col].values
         padded_signal = np.pad(signal, (0, padded_length - data_length), mode='edge')
-        
-        # Decompose to 5 levels
-        coeffs = pywt.swt(padded_signal, 'db2', level=5)
-        
-        # Zero out detail (high-freq noise), keep approximation (trend)
+        coeffs        = pywt.swt(padded_signal, 'db2', level=5)
         denoised_coeffs = [(approx, np.zeros_like(detail)) for approx, detail in coeffs]
         denoised_padded = pywt.iswt(denoised_coeffs, 'db2')
-        
         df_denoised[col] = denoised_padded[:data_length]
-    
+
     return df_denoised
+
+df_features_preprocessed = apply_modwt(df_features_scaled)
 ```
 
 **Parameters**:
-- **Wavelet**: Daubechies-2 (db2) - 4 vanishing moments, good balance
-- **Levels**: 5 - covers multi-scale noise
+- **Wavelet**: Daubechies-2 (db2) — 4 vanishing moments, good balance
+- **Levels**: 5 — covers multi-scale noise
 - **Strategy**: Keep approximation coefficients only (removes high-freq jitter)
 
 #### **Output**
 - **File**: `bitcoin_full_preprocessed.csv`
-- **Shape**: (1095, 17)
-- **Columns**: 16 scaled/denoised metrics + target log return
+- **Columns**: 15 scaled/denoised on-chain metrics + `y_raw_close_price`
 - **Artifacts**: 
-  - `bitcoin_scaler.pkl` - serialized scaler for inference
-  - `bitcoin_outlier_log_returns_chart.png` - visualization
-  - `bitcoin_raw_prices.csv` - backup of raw prices
+  - `bitcoin_scaler.pkl` — serialized scaler for inference
+  - `bitcoin_outlier_close_price_chart.png` — visualisation
+  - `bitcoin_raw_prices.csv` — backup of raw close prices
 
 ---
 
@@ -255,7 +268,7 @@ def apply_modwt(df):
 
 #### **3.1 Technical Indicators Overview**
 
-For each of **16 base features** × **3 timeframes** (1d, 7d, 14d), compute:
+For each of **15 base features** × **3 timeframes** (1d, 7d, 14d), compute:
 
 | Indicator | Calculation | Window | Purpose |
 |-----------|------------|--------|---------|
@@ -330,41 +343,27 @@ def generate_technical_indicators(df, base_columns):
 
 #### **3.3 Target Construction**
 
-**Multi-horizon Targets**:
+**Multi-horizon Regression Targets** (Close price h days ahead):
 ```python
-# Use raw (unsmoothed) log returns to prevent leakage
-df_engineered['Target_1d'] = df_engineered['y_raw_log_return'].shift(-1)
-
-df_engineered['Target_7d'] = (
-    df_engineered['y_raw_log_return']
-    .shift(-1)
-    .rolling(window=7)
-    .sum()
-    .shift(-6)
-)
-
-df_engineered['Target_14d'] = (
-    df_engineered['y_raw_log_return']
-    .shift(-1)
-    .rolling(window=14)
-    .sum()
-    .shift(-13)
-)
+# raw_close = unscaled Close price series (from y_raw_close_price column)
+# All shifts are strictly causal — only past data at time t is used to predict future
+df_engineered['Target_1d']  = raw_close.shift(-1)    # Close_{t+1}
+df_engineered['Target_7d']  = raw_close.shift(-7)    # Close_{t+7}
+df_engineered['Target_14d'] = raw_close.shift(-14)   # Close_{t+14}
 ```
 
-**Why Shift?**
-- `shift(-1)`: Look forward (future return)
-- `rolling().sum()`: Cumulative return over period
-- `shift(-(n-1))`: Align to avoid NaNs
+**Design Choices**:
+- `shift(-h)`: predict absolute Close price h days ahead
+- Targets are **not** log returns or rolling sums — direct price regression
+- ARIMA handles non-stationarity through automatic differencing (d≥1)
+- ML models receive the raw price target and use a StandardScaler on y during training
 
 #### **Output**
 - **File**: `bitcoin_full_engineered_features.csv`
-- **Shape**: (1067, 403)
-- **Features**: 
-  - 16 original metrics (normalized)
-  - 16 × 3 × 8 = 384 technical indicators
-  - 3 targets
-- **Total Columns**: 16 + 384 + 3 = 403
+- **Features**:
+  - 15 original on-chain metrics (scaled/denoised)
+  - 15 × 3 × 8 = 360 technical indicators
+  - 3 regression targets (Target_1d, Target_7d, Target_14d)
 
 ---
 
@@ -375,8 +374,7 @@ df_engineered['Target_14d'] = (
 ```
 Step 1: Train Random Forest
 ├─ 100 decision trees
-├─ No bootstrap (deterministic, though commented out)
-├─ Fit on training data only (2023-01-01 to 2025-05-31)
+├─ Fit on TRAINING FOLD ONLY (2016-01-01 to 2023-12-31)
 └─ Captures feature-target relationships
 
 Step 2: Calculate Permutation Importance
@@ -625,85 +623,65 @@ def calculate_vif(X, threshold=10.0, min_features=2):
 
 #### **5.1 ARIMA Model Overview**
 
-**ARIMA(p,d,q)**:
+**ARIMA(p,d,q)** applied to raw Close price (non-stationary series):
 - **p**: Autoregressive order (past values)
-- **d**: Differencing order (stationarity)
+- **d**: Differencing order — **auto-detected** (d≥1 required for price levels)
 - **q**: Moving average order (past errors)
 
 ```python
 from pmdarima import auto_arima
 
-# Auto ARIMA Grid Search
+# Auto ARIMA with automatic differencing (price is non-stationary)
 model_fit = auto_arima(
     y_train,
     start_p=0, start_q=0,
     max_p=5, max_q=5,
-    d=0,  # No differencing (log returns already stationary)
+    d=None,              # auto-detect integration order (AIC-based)
+    start_d=1, max_d=2,  # guide search: at least 1 difference
     seasonal=False,
     trace=False,
     error_action='ignore',
     suppress_warnings=True,
-    stepwise=True  # Faster than full grid
+    stepwise=True,
+    information_criterion='aic'
 )
 
-print(f"Optimal Model Selected: {model_fit.order}")
+print(f"Optimal Model: ARIMA{model_fit.order}")
 ```
 
 #### **5.2 Training & Evaluation Strategy**
 
-**Key Principle**: Train on clipped data, evaluate on raw data
+- **Train set**: Close price series 2016-01-01 → 2023-12-31 (in-sample)
+- **Test set**: Close price series 2024-01-01 → 2025-12-31 (out-of-sample)
+- For multi-day horizons, targets are `y.shift(-h)` (Close price h days ahead)
 
 ```python
-# Training Data Preparation
-y_train_tf = df_train_prep['y_clipped_log_return'].shift(-1).rolling(window=tf).sum().shift(-(tf-1))
-y_train = y_train_tf.replace([np.inf, -np.inf], np.nan).dropna()
+y_full  = df_prep['y_raw_close_price'].dropna()
+y_train = y_full.loc[:train_end]
+y_test  = y_full.loc[train_end:].iloc[1:]
 
-# Test Data Preparation (RAW - not clipped)
-y_test_tf = df_test_prep['y_raw_log_return'].shift(-1).rolling(window=tf).sum().shift(-(tf-1))
-y_test = y_test_tf.replace([np.inf, -np.inf], np.nan).dropna()
+# h-day horizon
+y_train_tf = y_train.shift(-tf).dropna()
+y_test_tf  = y_test.shift(-tf).dropna()
 
-# Generate Predictions
-predictions = model_fit.predict(n_periods=len(y_test))
-predictions.index = y_test.index
-
-# Evaluation on Raw Data
-rmse = np.sqrt(mean_squared_error(y_test, predictions))
-mae = mean_absolute_error(y_test, predictions)
+predictions = model_fit.predict(n_periods=len(y_test_tf))
 ```
 
-**Why This Strategy?**
-- **Clipped Training**: Focuses model on "normal" price movements
-- **Raw Evaluation**: Realistic performance on actual market data
-- **Prevents Overfitting**: Model learns stable patterns, not extreme outliers
+#### **5.3 Evaluation Metrics (RMSE, MAE, MAPE, R²)**
 
-#### **5.3 Results & Interpretations**
+```python
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
+rmse_val = np.sqrt(mean_squared_error(y_test_tf, predictions))
+mae_val  = mean_absolute_error(y_test_tf, predictions)
+mape_val = np.mean(np.abs((y_test_tf - predictions) / y_test_tf)) * 100
+r2_val   = r2_score(y_test_tf, predictions)
 ```
-╔════════════════════════════════════════════════════════════════╗
-║           AUTO ARIMA BASELINE MODEL PERFORMANCE                ║
-╠════════════════════════════════════════════════════════════════╣
-║ 1-DAY HORIZON                                                  ║
-├─ Model: ARIMA(1,0,0)                                           ║
-│  └─ Interpretation: AR(1) - Yesterday's return predicts today ║
-├─ RMSE: 0.015917                                                ║
-├─ MAE: 0.011234                                                 ║
-└─ Key: Very simple model suggests limited predictability       ║
-║                                                                 ║
-║ 7-DAY HORIZON                                                  ║
-├─ Model: ARIMA(5,0,4)                                           ║
-│  └─ 5 past values + 4 past errors = complex dynamics          ║
-├─ RMSE: 0.050088                                                ║
-├─ MAE: 0.038398                                                 ║
-└─ Key: Medium complexity indicates moderate correlation        ║
-║                                                                 ║
-║ 14-DAY HORIZON                                                 ║
-├─ Model: ARIMA(2,0,0)                                           ║
-│  └─ 2-period AR process - shorter term patterns               ║
-├─ RMSE: 0.076440                                                ║
-├─ MAE: 0.058246                                                 ║
-└─ Key: Largest errors at longest horizon (expected)            ║
-╚════════════════════════════════════════════════════════════════╝
-```
+
+- **RMSE**: Root Mean Squared Error (USD, penalises large errors)
+- **MAE**: Mean Absolute Error (USD, robust to outliers)
+- **MAPE**: Mean Absolute Percentage Error (scale-free, %)
+- **R²**: Coefficient of determination (variance explained, 1.0 = perfect)
 
 #### **5.4 Output Files**
 
@@ -711,9 +689,9 @@ mae = mean_absolute_error(y_test, predictions)
 
 ```
 bitcoin_AutoARIMA_predictions_1d.csv
-├─ Columns: Actual_Raw_Target | Predicted_Target
+├─ Columns: Actual_Close_Price | Predicted_Close_Price
 ├─ Index: Date
-└─ Format: Full predictions for test period
+└─ Format: Full predictions for test period (2024–2025)
 
 bitcoin_AutoARIMA_predictions_7d.csv
 bitcoin_AutoARIMA_predictions_14d.csv
@@ -721,8 +699,8 @@ bitcoin_AutoARIMA_predictions_14d.csv
 bitcoin_AutoARIMA_forecast_chart_full_1d.png
 bitcoin_AutoARIMA_forecast_chart_full_7d.png
 bitcoin_AutoARIMA_forecast_chart_full_14d.png
-├─ Time series plot: Actual vs Predicted
-├─ Visual inspection of model fit
+├─ Time series plot: Train / Test Actual / Forecast (Close Price USD)
+├─ Title includes RMSE, MAE, MAPE, R² for quick inspection
 └─ Identify periods of prediction failure
 ```
 
@@ -737,29 +715,32 @@ bitcoin_AutoARIMA_forecast_chart_full_14d.png
 │   │
 │   ├── RawData/
 │   │   ├── bitcoin_raw_data.csv
-│   │   │   └─ Shape: (1096, 16) | 16 blockchain metrics
+│   │   │   └─ ~3 652 rows × 16 columns | 2016-2025 on-chain metrics + Close price
 │   │   │
-│   │   └── bitcoin_full_raw.csv
-│   │       └─ Shape: (1096, 16) | Reindexed daily (no gaps)
+│   │   ├── bitcoin_full_raw.csv
+│   │   │   └─ Reindexed daily (no gaps) for full date range
+│   │   │
+│   │   └── bitcoin_retrieval_log.csv
+│   │       └─ Retrieval timestamp (UTC) + SHA-256 hash per feature
 │   │
 │   ├── ProcessedData/
 │   │   ├── bitcoin_full_preprocessed.csv
-│   │   │   └─ Shape: (1095, 17) | Cleaned, scaled, denoised
+│   │   │   └─ 15 scaled/denoised features + y_raw_close_price (regression target)
 │   │   │
 │   │   ├── bitcoin_scaler.pkl
-│   │   │   └─ Fitted MinMaxScaler(-1, 1) for inference
+│   │   │   └─ Fitted MinMaxScaler(-1, 1) for features (not Close price)
 │   │   │
 │   │   ├── bitcoin_raw_prices.csv
-│   │   │   └─ Backup of original prices for reference
+│   │   │   └─ Backup of raw Close prices for reference
 │   │   │
 │   │   ├── bitcoin_outlier_detected_log.csv
-│   │   │   └─ Rows flagged as outliers (40 total)
+│   │   │   └─ Close price rows flagged as outliers
 │   │   │
 │   │   ├── bitcoin_full_engineered_features.csv
-│   │   │   └─ Shape: (1067, 403) | 400 indicators + 3 targets
+│   │   │   └─ ~360 technical indicators + Target_1d / Target_7d / Target_14d
 │   │   │
-│   │   └── bitcoin_outlier_log_returns_chart.png
-│   │       └─ Visualization: Raw vs Clipped log returns
+│   │   └── bitcoin_outlier_close_price_chart.png
+│   │       └─ Visualization: Raw vs Clipped Close prices
 │   │
 │   └── Features Selection/
 │       │
@@ -793,31 +774,33 @@ bitcoin_AutoARIMA_forecast_chart_full_14d.png
 ## 🔍 Key Metrics & Statistics
 
 ### **Data Coverage**
-- **Date Range**: 2023-01-01 to 2025-12-31
-- **Total Days**: 1096 (includes weekends/holidays with NaN)
-- **Continuous Days**: 1095 (after imputation)
-- **Train/Test Split**: 2023-01-01 to 2025-05-31 (Train) | 2025-06-01 to 2025-12-31 (Test)
-- **Train Size**: ~523 days | **Test Size**: ~214 days
+- **Date Range**: 2016-01-01 to 2025-12-31 (~10 years)
+- **Total Days**: ~3 652 (includes weekends/holidays with NaN)
+- **Train Period**: 2016-01-01 to 2023-12-31 (~8 years, ~2 922 days)
+- **Test Period**: 2024-01-01 to 2025-12-31 (~2 years, ~730 days)
+- **Regression Target**: Close Price (USD), 1d / 7d / 14d ahead
 
 ### **Feature Engineering**
-- **Base Features**: 16 (blockchain metrics + price)
+- **Base Features**: 15 (on-chain blockchain metrics)
 - **Timeframes**: 3 (1d, 7d, 14d)
 - **Indicators per Feature**: 8 (SMA, EMA, WMA, STD, VAR, ROC, RSI, TRIX)
-- **Total Features Generated**: 16 + (16 × 3 × 8) = 16 + 384 = **400 features**
-- **Feature Reduction**: 400 → 17/43/44 (RF) or 1/34/41 (Boruta)
+- **Total Features Generated**: 15 + (15 × 3 × 8) = 15 + 360 = **375 features**
 
 ### **Preprocessing**
-- **Outliers Detected**: 40 rows (3.6% of data)
-- **Outlier Bounds**: Lower = -2.34%, Upper = +2.87%
-- **Normalization Range**: [-1, 1]
+- **Normalization**: MinMax [-1, 1] applied to **features only** (not Close price target)
+- **Scaler fit on**: training fold only (2016-2023)
+- **Wavelet Denoising**: applied to **scaled features only** (not Close price)
 - **Wavelet Levels**: 5 (MODWT, db2)
 
 ### **Model Performance**
-| Metric | 1d | 7d | 14d |
-|--------|----|----|-----|
-| RMSE | 0.0159 | 0.0501 | 0.0764 |
-| MAE | 0.0112 | 0.0384 | 0.0582 |
-| Model Order | (1,0,0) | (5,0,4) | (2,0,0) |
+All models report: RMSE, MAE, MAPE (%), R²
+
+| Metric | Description | Scale |
+|--------|-------------|-------|
+| RMSE | Root Mean Squared Error (penalises large errors) | USD |
+| MAE | Mean Absolute Error (robust to outliers) | USD |
+| MAPE | Mean Absolute Percentage Error | % |
+| R² | Coefficient of determination (1.0 = perfect fit) | — |
 
 ---
 
@@ -949,19 +932,23 @@ df.fillna(method='bfill')        # Use next known value
 
 ## 📝 Summary
 
-This pipeline implements a **production-grade Bitcoin prediction system** with:
+This pipeline implements a **production-grade Bitcoin close-price regression system** with:
 
-✅ **Rigorous Data Handling**: Imputation, outlier detection, normalization, denoising  
-✅ **Comprehensive Feature Engineering**: 400 technical indicators across 3 timeframes  
-✅ **Advanced Feature Selection**: Dual methods (RF + Boruta) with multi-stage filtering  
-✅ **Baseline Modeling**: Auto ARIMA with proper train/test evaluation  
-✅ **Anti-Leakage Measures**: All preprocessing fit on training data only  
-✅ **Visualization & Logging**: Charts, importance scores, detailed output files  
+✅ **Extended Data Coverage**: BitInfoCharts, 2016-01-01 to 2025-12-31 (~10 years)  
+✅ **Reproducible Extraction**: Retrieval timestamp + SHA-256 hash logged per feature  
+✅ **Rigorous Preprocessing**: Imputation, outlier detection, features-only scaling/denoising  
+✅ **Leakage-Safe Design**: Scaler and selectors fit on training fold (2016–2023) only  
+✅ **Regression Targets**: Close_{t+1}, Close_{t+7}, Close_{t+14} (direct price forecasting)  
+✅ **Comprehensive Feature Engineering**: ~360 technical indicators across 3 timeframes  
+✅ **Advanced Feature Selection**: Dual methods (RF + Boruta) run within training fold  
+✅ **ARIMA Baseline**: Auto ARIMA with automatic differencing (d≥1 for price levels)  
+✅ **Standard Metrics**: RMSE, MAE, MAPE (%), R² reported for all models  
+✅ **Visualization & Logging**: Charts with metric annotations, importance scores, CSV outputs  
 
-**Ready for**: Extension with ML models, deployment, and real-time prediction systems.
+**Ready for**: Comparison with XGBoost / LightGBM / LSTM, walk-forward validation, and publication.
 
 ---
 
-**Last Updated**: 2026-04-24  
+**Last Updated**: 2026-05-04  
 **Repository**: Gnoltd/BitcoinPredictionResearch-  
 **Notebook**: [CRYPTO]_TECHNICAL_INDICATORS.ipynb
